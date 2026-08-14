@@ -11,6 +11,7 @@ const auth = require('./lib/auth');
 const heatMeters = require('./lib/heatMeters');
 const analytics = require('./lib/analytics');
 const apiRoutes = require('./routes/api');
+const simRoutes = require('./routes/sim');
 
 const app = express();
 const upload = multer({ dest: path.join(__dirname, 'uploads') });
@@ -35,6 +36,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 app.use('/api', apiRoutes);
+app.use('/api/sim', simRoutes);
 
 // ---- LEGACY ENDPOINTS (preserved for backward compatibility) ----
 app.get('/api/session/roles', (q, s) => s.json(db.prepare('SELECT * FROM roles').all()));
@@ -90,6 +92,7 @@ app.get('/api/passports/node/:id', (q, s) => {
   s.json({
     node: n,
     status: nodeState(n),
+    passport: db.prepare('SELECT * FROM object_passports WHERE entity_id=? LIMIT 1').get(n.id) || null,
     pipes: db.prepare('SELECT * FROM pipes WHERE from_node_id=? OR to_node_id=?').all(n.id, n.id),
     houses: db.prepare('SELECT * FROM houses WHERE node_id=?').all(n.id),
     bursts: db.prepare('SELECT * FROM bursts WHERE node_id=? ORDER BY date_detected DESC').all(n.id),
@@ -123,7 +126,7 @@ app.get('/api/passports/pipe/:id', (q, s) => {
   if (!m) m = 'NULL';
   const bursts = nodeIds.length ? db.prepare(`SELECT * FROM bursts WHERE node_id IN (${m}) ORDER BY date_detected DESC`).all(...nodeIds) : [];
   const defects = nodeIds.length ? db.prepare(`SELECT * FROM defects WHERE node_id IN (${m}) ORDER BY date_observed DESC`).all(...nodeIds) : [];
-  s.json({ pipe: p, fromNode: from, toNode: to, bursts, defects });
+  s.json({ pipe: p, passport: db.prepare('SELECT * FROM object_passports WHERE entity_id=? LIMIT 1').get(p.id) || null, fromNode: from, toNode: to, bursts, defects });
 });
 
 app.post('/api/outage-zone', (q, s) => {

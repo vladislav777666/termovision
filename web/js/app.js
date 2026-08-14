@@ -27,7 +27,11 @@
 
   // ---------- state ----------
   let map = null;
-  const layers = { nodes: null, pipes: null, social: null, zone: null, demo: null };
+  const layers = { nodes: null, pipes: null, social: null, zone: null, demo: null, houses: null };
+  const houseCoords = new Map(); // id -> [lat, lon] (для перекраски после аварии)
+  const houseData = new Map();   // id -> исходные данные дома
+  let currentNodeId = null;
+  let simState = null; // результат аварии: { impact, criticality, timeline, pipeStates, houseStatuses }
   let selected = null; // {type:'node'|'pipe', id, name}
   let editorMode = null; // 'add-node'|'add-line'|'add-demo-node'|'add-deadend'|null
   let pendingLineFrom = null; // node id
@@ -64,7 +68,7 @@
 
   function renderLayers(d) {
     // clear old layers
-    Object.values(layers).forEach(l => { if (l && l !== layers.demo) { try { map.removeLayer(l); } catch (e) {} } });
+    Object.values(layers).forEach(l => { if (l && l !== layers.demo && l !== layers.houses) { try { map.removeLayer(l); } catch (e) {} } });
     layers.zone = null;
     if (!layers.demo) {
       layers.demo = L.layerGroup().addTo(map);
@@ -128,8 +132,11 @@
           if (l.feature && l.feature.properties.id === id) l.setStyle({ weight: 5, color: '#fbbf24' });
         });
       }
+      currentNodeId = id;
       showNodePassport(id);
+      loadNodeHouses(id);
     } else {
+      currentNodeId = null;
       // highlight pipe
       if (layers.pipes) {
         layers.pipes.eachLayer(l => {
@@ -138,6 +145,67 @@
       }
       showPipePassport(id);
     }
+  }
+
+  // ---------- дома на карте (интерактивные) ----------
+  async function loadNodeHouses(nodeId) {
+    try {
+      const houses = await api.get('sim/houses?nodeId=' + encodeURIComponent(nodeId) + '&limit=300');
+      renderHouses(houses);
+    } catch (e) { /* слой домов не критичен */ }
+  }
+
+  function renderHouses(houses, statusMap) {
+    if (layers.houses) { try { map.removeLayer(layers.houses); } catch (e) {} }
+    if (!houses || !houses.length) { layers.houses = null; return; }
+    houseCoords.clear();
+    layers.houses = L.layerGroup();
+    const statusColor = { NORMAL: '#22c55e', PARTIAL: '#f59e0b', NO_HEAT: '#ef4444', RESERVE_SUPPLY: '#3b82f6', RECOVERING: '#a78bfa', UNKNOWN: '#94a3b8' };
+    for (const h of houses) {
+      houseCoords.set(h.id, [h.lat, h.lon]);
+      houseData.set(h.id, h);
+      const st = statusMap && statusMap[h.id] ? statusMap[h.id] : 'NORMAL';
+      const m = L.circleMarker([h.lat, h.lon], {
+        radius: 4, color: statusColor[st] || '#64748b', weight: 1.5, fillOpacity: 0.85
+      });
+      m.bindTooltip((h.street ? h.street + ' ' + (h.house || '') : h.id) + (st !== 'NORMAL' ? ' · ' + st : ''), { sticky: true });
+      m.on('click', e => { L.DomEvent.stopPropagation(e); showHousePassport(h.id); });
+      m.addTo(layers.houses);
+    }
+    layers.houses.addTo(map);
+  }
+
+  async function toggleAllHouses() {
+    const btn = document.getElementById('houses-toggle');
+    if (layers.houses) {
+      try { map.removeLayer(layers.houses); } catch (e) {}
+      layers.houses = null;
+      btn.textContent = '🏠 Показать все дома';
+      return;
+    }
+    btn.textContent = 'Загрузка…';
+    try {
+      const houses = await api.get('sim/houses?limit=6000');
+      renderHouses(houses);
+      btn.textContent = '🏠 Скрыть все дома';
+    } catch (e) {
+      btn.textContent = '🏠 Показать все дома';
+      alert('Не удалось загрузить дома: ' + (e.message || ''));
+    }
+  }
+
+  function applySimHouseStatuses(impact) {
+    const st = {};
+    for (const b of impact.buildings) st[b.id] = b.status;
+    if (houseData.size === 0) {
+      // дома не загружены — подтянем все и раскрасим
+      api.get('sim/houses?limit=6000').then(hs => {
+        houseData.clear(); houseCoords.clear();
+        renderHouses(hs, st);
+      }).catch(() => {});
+      return;
+    }
+    renderHouses([...houseData.values()], st);
   }
 
   function passportBlock(title, rows) {
@@ -156,6 +224,18 @@
       const statusLabels = { normal: 'Норма', monitored: 'На контроле', emergency: 'Авария', repair: 'Ремонт', high_risk: 'Высокий риск', data_missing: 'Нет данных' };
       const st = p.status || n.status || 'normal';
       const risk = p.risk ? `<span class="pill ${p.risk.level}">${p.risk.score} · ${p.risk.level}</span>` : '—';
+      const pk = p.passport;
+
+      const passportRows = pk ? [
+        row('Номер секции', esc(pk.section_number || '—')),
+        row('Диаметр, мм', fmt(pk.diameter_mm)),
+        row('Год установки', fmt(pk.year_installed)),
+        row('Материал', esc(pk.material || '—')),
+        row('Статус', esc(pk.status || '—')),
+        row('Источник данных', esc(pk.source || '—')),
+        row('Паспорт (Google Drive)', pk.passport_url ? `<a class="pp-link" href="${esc(pk.passport_url)}" target="_blank" rel="noopener">открыть паспорт ↗</a>` : '—'),
+        row('Примечания', esc(pk.notes || '—'))
+      ] : [];
 
       const houseRows = (p.houses || []).slice(0, 200).map(h =>
         `<div class="pp-house" onclick="window.__showHouse('${h.id}')"><b>${esc([h.street, h.house, h.block].filter(Boolean).join(' ') || h.id)}</b><br><small>${esc(h.tk || '')} · ${h.year ? 'Год: ' + h.year : ''} · Нагр: ${h.load != null ? h.load + ' Гкал/ч' : '—'}</small></div>`
@@ -173,6 +253,7 @@
         row('Инспекций', (p.inspections || []).length),
         row('Аварий', (p.bursts || []).length),
         row('Дефектов', (p.defects || []).length),
+        passportBlock('Паспорт объекта', passportRows),
         passportBlock('Дома (паспорта из БД)', houseRows ? [houseRows] : []),
         passportBlock('История аварий', (p.bursts || []).slice(0, 8).map(b => `<div class="pp-event danger">${esc(fmt(b.date_detected).slice(0, 16))} — ${esc(b.defect_char || b.address || b.tk || b.status)}</div>`)),
         passportBlock('Дефекты', (p.defects || []).slice(0, 8).map(b => `<div class="pp-event warn">${esc(fmt(b.date_observed).slice(0, 16))} — P${fmt(b.priority)} ${esc(b.defect_type || '')}</div>`)),
@@ -193,6 +274,17 @@
     try {
       const p = await api.get('passports/pipe/' + id);
       const pp = p.pipe || {};
+      const pk = p.passport;
+      const passportRows = pk ? [
+        row('Номер секции', esc(pk.section_number || '—')),
+        row('Диаметр, мм', fmt(pk.diameter_mm)),
+        row('Год установки', fmt(pk.year_installed)),
+        row('Материал', esc(pk.material || '—')),
+        row('Статус', esc(pk.status || '—')),
+        row('Источник данных', esc(pk.source || '—')),
+        row('Паспорт (Google Drive)', pk.passport_url ? `<a class="pp-link" href="${esc(pk.passport_url)}" target="_blank" rel="noopener">открыть паспорт ↗</a>` : '—'),
+        row('Примечания', esc(pk.notes || '—'))
+      ] : [];
       const html = [
         `<div class="pp-head"><b>${esc(pp.name || pp.id)}</b></div>`,
         row('ID', esc(pp.id)),
@@ -200,13 +292,136 @@
         row('Длина', fmt(pp.length_m) + ' м'),
         row('От узла', p.fromNode ? esc(p.fromNode.name) + ' (' + esc(p.fromNode.id) + ')' : '—'),
         row('До узла', p.toNode ? esc(p.toNode.name) + ' (' + esc(p.toNode.id) + ')' : '—'),
+        `<div class="pp-row"><span class="pp-label">Загрузка</span><span class="pp-value" id="pipe-load-cell">—</span></div>`,
+        passportBlock('Паспорт объекта', passportRows),
         passportBlock('Аварии', (p.bursts || []).slice(0, 8).map(b => `<div class="pp-event danger">${esc(fmt(b.date_detected).slice(0, 16))} — ${esc(b.defect_char || b.address || '')}</div>`)),
         passportBlock('Дефекты', (p.defects || []).slice(0, 8).map(b => `<div class="pp-event warn">${esc(fmt(b.date_observed).slice(0, 16))} — ${esc(b.defect_type || '')}</div>`))
       ].join('');
-      body.innerHTML = `<div class="passport-meta"><button onclick="runSimulation()">🔍 Симуляция отключения</button></div>${html}`;
+      body.innerHTML = `<div class="passport-meta">
+        <button onclick="runSimulation()">🔍 Симуляция отключения</button>
+        <button id="sim-accident-btn" style="background:#b91c1c">🚨 СИМУЛИРОВАТЬ АВАРИЮ</button>
+        <div id="pipe-forecast" class="pp-loading">Прогноз критичности…</div>
+      </div>${html}`;
+      document.getElementById('sim-accident-btn').onclick = () => openFailureModal(id, pp.name || pp.id);
+      // прогноз "что будет, если эта труба выйдет из строя" — до аварии
+      api.get('sim/pipes/' + encodeURIComponent(id) + '/criticality').then(f => {
+        const box = document.getElementById('pipe-forecast');
+        if (!box) return;
+        const loadCell = document.getElementById('pipe-load-cell');
+        if (loadCell && f.pipe && f.pipe.loadGcalH != null) {
+          loadCell.textContent = f.pipe.loadGcalH.toLocaleString('ru', { maximumFractionDigits: 3 }) + ' Гкал/ч' +
+            (f.pipe.diameterEstimated ? ' · Ø' + (f.pipe.diameterMm || '—') + ' мм (расч.)' : '');
+        }
+        box.innerHTML = `<b>Что будет, если эта труба выйдет из строя?</b>
+          <div class="pp-row"><span class="pp-label">Загрузка линии</span><span class="pp-value"><b>${(f.pipe.loadGcalH || 0).toLocaleString('ru', { maximumFractionDigits: 3 })} Гкал/ч</b></span></div>
+          <div class="pp-row"><span class="pp-label">Расход</span><span class="pp-value">${(f.pipe.flowKgS || 0).toLocaleString('ru', { maximumFractionDigits: 1 })} кг/с</span></div>
+          <div class="pp-row"><span class="pp-label">Давление на источнике</span><span class="pp-value">${f.hydraulic ? f.hydraulic.feedPressureBar : '—'} бар</span></div>
+          <div class="pp-row"><span class="pp-label">Домов затронуто</span><span class="pp-value"><b>${f.forecast.affectedBuildings}</b></span></div>
+          <div class="pp-row"><span class="pp-label">Квартир</span><span class="pp-value"><b>${f.forecast.totalAffectedApartments}</b></span></div>
+          <div class="pp-row"><span class="pp-label">Нагрузка</span><span class="pp-value"><b>${f.forecast.totalLostLoadGcalH} Гкал/ч</b></span></div>
+          <div class="pp-row"><span class="pp-label">Площадь</span><span class="pp-value"><b>${f.forecast.totalAffectedAreaM2.toLocaleString('ru')} м²</b></span></div>
+          <div class="pp-row"><span class="pp-label">Резерв</span><span class="pp-value"><b>${f.hasReserve ? 'ЕСТЬ' : 'НЕТ'}</b></span></div>
+          <div class="pp-row"><span class="pp-label">Критичность</span><span class="pp-value"><span class="pill ${f.criticality.level.toLowerCase()}">${f.criticality.level} · ${f.criticality.score}</span></span></div>
+          ${f.limitationMessage ? `<div class="sim-warning">⚠️ ${esc(f.limitationMessage)}</div>` : ''}`;
+      }).catch(() => {});
     } catch (e) {
       body.innerHTML = '<div class="pp-loading">Ошибка</div>';
     }
+  }
+
+  // ---------- симуляция аварии ----------
+  function openFailureModal(pipeId, pipeName) {
+    simState = null;
+    document.getElementById('fail-pipe-id').value = pipeId;
+    document.getElementById('fail-pipe-name').textContent = 'Аварийный участок: ' + pipeName + ' (' + pipeId + ')';
+    document.getElementById('fail-type').value = 'rupture';
+    document.getElementById('fail-severity').value = 4;
+    document.getElementById('fail-modal').style.display = 'block';
+  }
+
+  async function runFailureSim() {
+    const pipeId = document.getElementById('fail-pipe-id').value;
+    const type = document.getElementById('fail-type').value;
+    const severity = +document.getElementById('fail-severity').value;
+    const body = { affectedPipeId: pipeId, type, severity };
+    const leak = document.getElementById('fail-leak').value;
+    if (leak) body.leakRate = +leak;
+    const btn = document.getElementById('fail-run-btn');
+    btn.disabled = true; btn.textContent = 'Расчёт…';
+    try {
+      const s = await api.post('sim/simulations', { source: 'db', label: 'Авария ' + pipeId });
+      if (!s.id) throw new Error(s.error || 'не удалось создать симуляцию');
+      const res = await api.post('sim/simulations/' + s.id + '/fail-pipe', body);
+      if (res.error) throw new Error(res.error);
+      document.getElementById('fail-modal').style.display = 'none';
+      simState = res;
+      showImpactPanel(res);
+      applySimHouseStatuses(res.impact);
+      recolorPipesBySim(res.pipeStates || []);
+    } catch (e) {
+      alert('Ошибка симуляции: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = '🚨 Запустить аварию';
+    }
+  }
+
+  function recolorPipesBySim(states) {
+    if (!layers.pipes) return;
+    const stMap = {};
+    for (const s of states) stMap[s.id] = s.status;
+    layers.pipes.eachLayer(l => {
+      const id = l.feature && l.feature.properties.id;
+      const st = stMap[id];
+      if (st === 'FAILED') l.setStyle({ color: '#f97316', weight: 6, dashArray: '6 4' });
+      else if (st === 'ISOLATED') l.setStyle({ color: '#ef4444', weight: 5, opacity: 0.9 });
+      else l.setStyle({ color: COLORS[(l.feature && l.feature.properties.status) || 'normal'] || '#64748b', weight: 3 });
+    });
+  }
+
+  function showImpactPanel(res) {
+    const modal = document.getElementById('impact-modal');
+    const body = document.getElementById('impact-body');
+    modal.style.display = 'block';
+    const st = res.impact.stats;
+    const crit = res.criticality;
+    const failed = (res.failedElements || []).map(f => f.name || f.id).join(', ') || '—';
+
+    const houseRows = res.impact.buildings.filter(b => b.status !== 'NORMAL' && b.status !== 'UNKNOWN').slice(0, 60).map(b => `
+      <div class="pp-house" onclick="showHousePassport('${esc(b.id)}')">
+        <b style="color:${b.status === 'NO_HEAT' ? '#f87171' : (b.status === 'PARTIAL' ? '#fbbf24' : '#60a5fa')}">${esc(b.address || b.id)}</b> · ${b.status}
+        <br><small>${b.status === 'NO_HEAT' ? 'Потеря: ' + b.lostLoadGcalH + ' Гкал/ч' : 'Доступно: ' + (b.availableLoadGcalH ?? 0) + ' Гкал/ч'}${b.pressureBar != null ? ' · P=' + b.pressureBar + ' бар' : ''} · ${esc(b.reason || '')}</small>
+      </div>`).join('');
+
+    body.innerHTML = `
+      <div class="sim-warning" style="margin-top:0"><b>Аварийная ситуация</b><br>
+        Участок: ${esc(failed)}<br>
+        Тип: ${esc((res.failedElements || []).map(f => f.label).join(', ') || '—')}<br>
+        Статус: ЛОКАЛИЗОВАНА · Критичность: <span class="pill ${crit.level.toLowerCase()}">${crit.level} · ${crit.score}/100</span></div>
+      <div class="pp-block">
+        <div class="pp-title">Затронуто</div>
+        <div class="pp-row"><span class="pp-label">Домов</span><span class="pp-value"><b>${st.affectedBuildings}</b></span></div>
+        <div class="pp-row"><span class="pp-label">Полностью отключено</span><span class="pp-value"><b style="color:#f87171">${st.noHeatBuildings}</b></span></div>
+        <div class="pp-row"><span class="pp-label">Частично ограничено</span><span class="pp-value"><b style="color:#fbbf24">${st.partialBuildings}</b></span></div>
+        <div class="pp-row"><span class="pp-label">Резервное питание</span><span class="pp-value"><b style="color:#60a5fa">${st.reserveBuildings}</b></span></div>
+        <div class="pp-row"><span class="pp-label">Квартир</span><span class="pp-value">${st.totalAffectedApartments}</span></div>
+        <div class="pp-row"><span class="pp-label">Площадь</span><span class="pp-value">${st.totalAffectedAreaM2.toLocaleString('ru')} м²</span></div>
+        <div class="pp-row"><span class="pp-label">Потеря нагрузки</span><span class="pp-value"><b>${st.totalLostLoadGcalH} Гкал/ч</b></span></div>
+        <div class="pp-row"><span class="pp-label">Тепловые камеры</span><span class="pp-value">${st.affectedChambers}</span></div>
+        <div class="pp-row"><span class="pp-label">Давление на источнике</span><span class="pp-value">${res.impact.hydraulic ? res.impact.hydraulic.feedPressureBar : '—'} бар</span></div>
+        <div class="pp-row"><span class="pp-label">Мин. давление в зоне</span><span class="pp-value"><b>${res.impact.hydraulic && res.impact.hydraulic.minPressureObservedBar != null ? res.impact.hydraulic.minPressureObservedBar : '—'} бар</b></span></div>
+        <div class="pp-row"><span class="pp-label">Расчётное восстановление</span><span class="pp-value"><b>${esc(res.estimatedRecovery || '—')}</b></span></div>
+      </div>
+      ${res.impact.limitationMessage ? `<div class="sim-warning">⚠️ ${esc(res.impact.limitationMessage)}</div>` : ''}
+      ${res.impact.worstBuilding ? `<div class="pp-block"><div class="pp-title">Самый затронутый объект</div>
+        ${esc(res.impact.worstBuilding.address || res.impact.worstBuilding.id)} — потеря <b>${res.impact.worstBuilding.lostLoadGcalH} Гкал/ч</b> · ${res.impact.worstBuilding.status}<br>
+        <small>${esc(res.impact.worstBuilding.reason || '')}</small></div>` : ''}
+      <div class="pp-block"><div class="pp-title">Здания (${res.impact.buildings.filter(b => b.status !== 'NORMAL').length})</div>${houseRows || '<div class="pp-empty">Нет затронутых зданий</div>'}</div>
+      <div class="pp-block"><div class="pp-title">Таймлайн аварии</div>
+        ${(res.timeline || []).map(t => `<div class="pp-event"><b>T+${t.tMin} мин</b> — ${esc(t.label)}<br><small style="color:var(--muted)">${esc(t.description)}</small></div>`).join('')}
+      </div>
+      <div class="pp-block"><div class="pp-title">Рекомендации</div>
+        ${(res.recommendations || []).map(r => `<div class="pp-event">• ${esc(r)}</div>`).join('')}
+      </div>`;
   }
 
   async function showHousePassport(id) {
@@ -218,17 +433,25 @@
       const r = await api.get('passports/house/' + id);
       const h = r.house || {};
       const n = r.node || null;
+      const pipesRows = (r.relatedPipes || []).map(p =>
+        `<div class="pp-house" onclick="window.__showPipe('${esc(p.id)}')"><b>${esc(p.name || p.id)}</b> · ${p.diameter_mm ? p.diameter_mm + ' мм' : '—'} · ${p.length_m ? p.length_m + ' м' : '—'}</div>`
+      ).join('');
       body.innerHTML = [
         `<div class="pp-head"><b>${esc([h.street, h.house, h.block].filter(Boolean).join(' ') || h.id)}</b></div>`,
         row('ID', esc(h.id)),
         row('ТК', esc(h.tk || '—')),
-        row('Узел', n ? esc(n.name) + ' (' + esc(n.id) + ')' : '—'),
-        row('Год', fmt(h.year)),
+        row('Подключен к узлу', n ? esc(n.name) + ' (' + esc(n.id) + ')' : '—'),
+        row('Год постройки', fmt(h.year)),
         row('Нагрузка', h.load != null ? h.load + ' Гкал/ч' : '—'),
+        row('Площадь', h.area != null ? (+h.area).toLocaleString('ru') + ' м²' : '—'),
+        row('Квартир', fmt(h.flats)),
+        row('Этажей', fmt(h.floors)),
         row('Владелец', esc(h.owner || '—')),
         row('Примечание', esc(h.note || '—')),
+        passportBlock('Прилежащие участки', pipesRows ? [pipesRows] : []),
         passportBlock('История', (r.history || []).slice(0, 8).map(b => `<div class="pp-event ${b.status === 'active' ? 'danger' : ''}">${esc(fmt(b.date_detected).slice(0, 16))} — ${esc(b.defect_char || b.address || '')}</div>`))
       ].join('');
+      window.__showPipe = (pid) => { modal.style.display = 'none'; selectObject('pipe', pid, pid); };
     } catch (e) {
       body.innerHTML = '<div class="pp-loading">Ошибка</div>';
     }
@@ -537,5 +760,7 @@
   addEventListener('hashchange', handleHash);
 
   // ---------- boot ----------
+  window.__toggleHouses = toggleAllHouses;
+  window.__runFailure = runFailureSim;
   document.addEventListener('DOMContentLoaded', () => { init(); handleHash(); });
 })();

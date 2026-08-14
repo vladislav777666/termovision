@@ -39,6 +39,7 @@ button.ghost{background:transparent;border:1px solid var(--line);color:#a8dbff}
 .pp-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #1a2f47;font-size:13px}
 .pp-label{color:var(--muted)}
 .pp-value{text-align:right;max-width:60%}
+.pp-link{color:#60a5fa;text-decoration:none;word-break:break-all}.pp-link:hover{text-decoration:underline}
 .pp-house{background:#0a1729;border:1px solid #1d3650;border-radius:6px;padding:6px;margin:4px 0;cursor:pointer}
 .pp-house:hover{background:#122a47}
 .pp-event{padding:3px 0;border-bottom:1px solid #16293f;font-size:13px}
@@ -95,6 +96,12 @@ button.ghost{background:transparent;border:1px solid var(--line);color:#a8dbff}
       <div class="card-body"><div id="passport-body" class="pp-loading">Выберите узел или участок на карте.</div></div>
     </div>
 
+    <div class="card">
+      <h2>Симулятор аварий</h2>
+      <button id="houses-toggle" class="ghost" style="width:100%" onclick="window.__toggleHouses()">🏠 Показать все дома</button>
+      <div class="hint">Выберите участок на карте — появится прогноз критичности и кнопка «Симулировать аварию». Дома кликабельны: открывается паспорт.</div>
+    </div>
+
     <div class="card" id="ed-tools">
       <h2>Редактор топологии</h2>
       <div class="row">
@@ -136,6 +143,32 @@ button.ghost{background:transparent;border:1px solid var(--line);color:#a8dbff}
 <div class="modal" id="sim-modal" style="display:none">
   <div class="modal-head"><b>Симуляция отключения</b><button class="ghost" id="sim-clear" style="padding:2px 8px">✕</button></div>
   <div class="modal-body" id="sim-result"></div>
+</div>
+
+<div class="modal" id="fail-modal" style="display:none">
+  <div class="modal-head"><b>Симуляция аварии</b><button class="ghost" onclick="document.getElementById('fail-modal').style.display='none'" style="padding:2px 8px">✕</button></div>
+  <div class="modal-body">
+    <b id="fail-pipe-name">—</b>
+    <input type="hidden" id="fail-pipe-id">
+    <label style="color:var(--muted);font-size:12px">Тип аварии</label>
+    <select id="fail-type">
+      <option value="rupture">Разрыв трубы</option>
+      <option value="leak">Утечка</option>
+      <option value="planned">Плановое отключение</option>
+      <option value="full_shutoff">Полное перекрытие</option>
+      <option value="partial_damage">Частичное повреждение</option>
+    </select>
+    <label style="color:var(--muted);font-size:12px">Severity (0–4): <span id="fail-sev-label">4 — Полное отключение</span></label>
+    <input type="range" id="fail-severity" min="0" max="4" value="4" oninput="document.getElementById('fail-sev-label').textContent=this.value">
+    <label style="color:var(--muted);font-size:12px">Потеря расхода при утечке, кг/с (необязательно)</label>
+    <input id="fail-leak" placeholder="например: 5">
+    <button id="fail-run-btn" style="width:100%;background:#b91c1c" onclick="window.__runFailure()">🚨 Запустить аварию</button>
+  </div>
+</div>
+
+<div class="modal" id="impact-modal" style="display:none">
+  <div class="modal-head"><b>Аварийная ситуация</b><button class="ghost" onclick="document.getElementById('impact-modal').style.display='none'" style="padding:2px 8px">✕</button></div>
+  <div class="modal-body" id="impact-body"></div>
 </div>
 
 <script src="/js/app.js"></script>

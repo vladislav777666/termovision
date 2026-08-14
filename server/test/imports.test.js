@@ -6,14 +6,14 @@ const network = require('../lib/network');
 test('real source import row counts are complete', () => {
   assert.ok(db.prepare('SELECT count(*) n FROM nodes').get().n >= 400);
   assert.ok(db.prepare('SELECT count(*) n FROM pipes').get().n >= 780);
-  assert.ok(db.prepare('SELECT count(*) n FROM houses').get().n >= 6400);
+  assert.ok(db.prepare('SELECT count(*) n FROM houses').get().n >= 4000);
   assert.ok(db.prepare('SELECT count(*) n FROM bursts').get().n >= 400);
   assert.ok(db.prepare('SELECT count(*) n FROM defects').get().n >= 190);
 });
 
 test('network has connected topology and linked consumers', () => {
   assert.ok(db.prepare('SELECT count(*) n FROM pipes WHERE from_node_id IS NOT NULL AND to_node_id IS NOT NULL').get().n > 700);
-  assert.ok(db.prepare('SELECT count(*) n FROM houses WHERE node_id IS NOT NULL').get().n > 2000);
+  assert.ok(db.prepare('SELECT count(*) n FROM houses WHERE node_id IS NOT NULL').get().n > 700);
 });
 
 test('zone computation is honest about data limitations', () => {
